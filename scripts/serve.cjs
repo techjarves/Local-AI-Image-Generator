@@ -85,6 +85,8 @@ let currentSettings = {
   threads:  8,
   useGpu:   true,
   backendType: "auto",
+  vaeTiling: true,
+  vaeOnCpu:  false,
 };
 
 let lastCpuSample = null;
@@ -709,6 +711,13 @@ function startBackend(settings = {}) {
     );
   }
 
+  if (currentSettings.vaeTiling) {
+    args.push("--vae-tiling");
+  }
+  if (currentSettings.vaeOnCpu) {
+    args.push("--vae-on-cpu");
+  }
+
   console.log("  [backend] Starting:", path.basename(backendPath), args.join(" "));
   backendReady = false;
 
@@ -1314,6 +1323,8 @@ const server = http.createServer(async (req, res) => {
       newSettings.backendType = String(body.backend_type);
       newSettings.useGpu = body.backend_type !== "cpu";
     }
+    if (typeof body.vae_tiling === "boolean") newSettings.vaeTiling = body.vae_tiling;
+    if (typeof body.vae_on_cpu === "boolean") newSettings.vaeOnCpu = body.vae_on_cpu;
     startBackend(newSettings);
     return json(res, 200, { ok: true, message: "Backend restarting...", settings: currentSettings });
   }
