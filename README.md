@@ -1,15 +1,8 @@
 # 🖼️ Local AI Image Generator
 
-### A fully self-contained, offline-first AI Art Studio for Windows
+### An easy, zero-setup Stable Diffusion GUI for Windows. Run GGUF & Safetensors models offline without Python configuration.
 
-<div align="center">
 
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white&style=flat-square)](https://github.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Build: v1.0.0](https://img.shields.io/badge/Release-v1.0.0-success?style=flat-square)](https://github.com)
-[![Engine: stable--diffusion.cpp](https://img.shields.io/badge/Engine-stable--diffusion.cpp-orange?style=flat-square)](https://github.com/leejet/stable-diffusion.cpp)
-
----
 
 | **Generation Workspace** | **Model Library** | **Image Constraints** |
 | :---: | :---: | :---: |
