@@ -209,26 +209,6 @@ function ImageConstraints({ constraints, setConstraints, activeModel, specs, bac
                 </span>
               </div>
 
-              {/* CFG Scale Slider */}
-              <div className="m3-slider-group" style={{ marginTop: "8px" }}>
-                <div className="m3-slider-header">
-                  <span className="m3-slider-label">Prompt Strictness (Instruction obedience)</span>
-                  <span className="m3-slider-value">{constraints.cfgScale.toFixed(1)}</span>
-                </div>
-                <input
-                  type="range"
-                  className="m3-slider"
-                  value={constraints.cfgScale}
-                  onChange={(e) => updateConstraint("cfgScale", parseFloat(e.target.value))}
-                  min="1"
-                  max="15"
-                  step="0.5"
-                />
-                <span style={{ fontSize: "0.75rem", color: "var(--md-sys-color-outline)", lineHeight: "1.3" }}>
-                  How closely the AI follows your text prompt. Lower = more creative. Higher = more strict.
-                </span>
-              </div>
-
               {/* Random Seed DNA */}
               <div className="m3-text-field" style={{ marginTop: "8px" }}>
                 <label className="m3-text-field-label">Image Blueprint (DNA Seed)</label>

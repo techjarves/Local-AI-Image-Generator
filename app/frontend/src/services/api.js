@@ -8,11 +8,31 @@ export const isTauri = () => {
 
 // Cached hardware specs
 let cachedSpecs = null;
+let cachedBackendPort = null;
 export const EXPECTED_SERVER_BUILD = "polish-setup-v1";
 
 const isLocalServerMode = () => {
   return typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
 };
+
+async function getBackendPort() {
+  if (isLocalServerMode()) {
+    try {
+      const status = await getBackendStatus();
+      const port = Number(status?.port);
+      if (Number.isInteger(port) && port > 0) {
+        cachedBackendPort = port;
+        return port;
+      }
+    } catch (_) {}
+  }
+  if (cachedBackendPort) return cachedBackendPort;
+  return 8080;
+}
+
+async function getBackendBaseUrl() {
+  return `http://127.0.0.1:${await getBackendPort()}`;
+}
 
 export function formatBytes(bytes) {
   const value = Number(bytes) || 0;
@@ -208,10 +228,11 @@ export async function listLocalModels() {
 // In web/portable mode this calls serve.cjs management API which restarts the
 // sd-vulkan.exe process with --steps, --cfg-scale, --sampling-method flags.
 export async function startServer(modelPath, constraints) {
+  const backendPort = await getBackendPort();
   if (isTauri()) {
     const launchParams = {
       model_path: modelPath,
-      port: 8080,
+      port: backendPort,
       use_gpu: constraints.useGpu !== false,
       backend_type: constraints.backendType || (constraints.useGpu === false ? "cpu" : "auto"),
       threads: constraints.threads || 8,
@@ -241,6 +262,9 @@ export async function startServer(modelPath, constraints) {
     const data = JSON.parse(text || "{}");
     if (!res.ok || data.ok === false) {
       throw new Error(data.error || `Backend restart failed (HTTP ${res.status})`);
+    }
+    if (Number.isInteger(Number(data.port)) && Number(data.port) > 0) {
+      cachedBackendPort = Number(data.port);
     }
     console.log("Backend restart:", data.message);
     return data.message;
@@ -320,8 +344,7 @@ export async function generateImage(prompt, negativePrompt, constraints, activeM
   console.log("Initiating image generation:", { prompt, negativePrompt, constraints, activeModelName });
   const startTime = Date.now();
 
-  const port = 8080;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const baseUrl = await getBackendBaseUrl();
   
   // Prepare payload based on standard stable-diffusion.cpp REST endpoint schemas
   const payload = {
@@ -738,8 +761,7 @@ export async function deleteModel(filename) {
 
 // Ping the server to check if it is active and responding
 export async function pingServer() {
-  const port = 8080;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const baseUrl = await getBackendBaseUrl();
   try {
     const response = await fetch(`${baseUrl}/v1/models`, { method: "GET" });
     return response.ok;

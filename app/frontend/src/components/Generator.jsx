@@ -1,5 +1,5 @@
 import React, { memo, useState, useRef, useCallback } from "react";
-import { Sparkles, Download, Copy, RefreshCw, Check, Sliders, Layers, Trash2 } from "lucide-react";
+import { Sparkles, Download, Copy, RefreshCw, Check, Sliders, Trash2 } from "lucide-react";
 import { generateImage, startServer, stopServer, waitForServerReady, getBackendStatus, getGenerationProgress, saveGeneratedOutput, deleteGeneratedOutputs } from "../services/api";
 
 const GalleryItem = memo(({ img, idx, isSelected, onClick }) => {
@@ -599,10 +599,6 @@ function Generator({
                   <div className="status-chip" onClick={() => setActiveTab("constraints")}>
                     <RefreshCw size={14} />
                     <span>Steps: {constraints.steps}</span>
-                  </div>
-                  <div className="status-chip" onClick={() => setActiveTab("constraints")}>
-                    <Layers size={14} />
-                    <span>CFG: {constraints.cfgScale.toFixed(1)}</span>
                   </div>
                   <div className="status-chip" onClick={() => setActiveTab("constraints")}>
                     <Sparkles size={14} />

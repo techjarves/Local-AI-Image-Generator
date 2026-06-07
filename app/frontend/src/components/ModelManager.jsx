@@ -250,10 +250,12 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
   const performLoadModel = async (modelId) => {
     const isTauriDesktop = typeof window !== "undefined" && window.__TAURI_INTERNALS__ !== undefined;
     const isLocalServerMode = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+    const backendStatus = await getBackendStatus();
+    const backendPort = backendStatus?.port || 8080;
     
     if (!isTauriDesktop && !isLocalServerMode) {
       const isAlreadyRunning = await pingServer();
-      const cmd = `.\\backend\\win\\vulkan\\sd-vulkan.exe --listen-port 8080 --model .\\models\\${modelId} --threads 8`;
+      const cmd = `.\\backend\\win\\vulkan\\sd-vulkan.exe --listen-port ${backendPort} --model .\\models\\${modelId} --threads 8`;
       
       if (isAlreadyRunning) {
         if (await showConfirm({ title: "Web Browser Mode", message: `To load "${modelId}" on the active GPU server, restart your terminal backend with:\n\n${cmd}\n\nUpdate the UI status anyway?`, confirmLabel: "Update UI" })) {
@@ -261,7 +263,7 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
           setServerRunning(true);
         }
       } else {
-        if (await showConfirm({ title: "Backend Not Running", message: `C++ backend server is not running on port 8080.\n\nTo run locally, start:\n\n${cmd}\n\nProceed in Simulation Mode instead?`, confirmLabel: "Proceed" })) {
+        if (await showConfirm({ title: "Backend Not Running", message: `C++ backend server is not running on port ${backendPort}.\n\nTo run locally, start:\n\n${cmd}\n\nProceed in Simulation Mode instead?`, confirmLabel: "Proceed" })) {
           setActiveModel(modelId);
           setServerRunning(false);
         }
@@ -330,7 +332,7 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
         setActiveModel(modelId);
         setServerRunning(true);
       } else {
-        throw new Error(crashError || "Model server failed to respond on port 8080.");
+        throw new Error(crashError || `Model server failed to respond on port ${backendPort}.`);
       }
     } catch (e) {
       console.error("Failed to load model:", e);

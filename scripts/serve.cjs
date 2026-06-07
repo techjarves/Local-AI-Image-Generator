@@ -11,8 +11,14 @@ const os       = require("os");
 const path     = require("path");
 const { spawn, spawnSync, execSync, exec } = require("child_process");
 
-const PORT_FRONTEND = process.env.PORT ? parseInt(process.env.PORT) : 1420;
-const PORT_BACKEND  = 8080;
+function readPort(value, fallback) {
+  const port = parseInt(value, 10);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : fallback;
+}
+
+const PORT_FRONTEND = readPort(process.env.PORT || process.env.FRONTEND_PORT, 1420);
+const PREFERRED_BACKEND_PORT = readPort(process.env.BACKEND_PORT || process.env.SD_BACKEND_PORT, 8080);
+let PORT_BACKEND = PREFERRED_BACKEND_PORT;
 const MAX_JSON_BODY_BYTES = 64 * 1024 * 1024;
 const SERVER_BUILD = "polish-setup-v1";
 const ROOT    = path.join(__dirname, "..");
@@ -310,6 +316,21 @@ function checkPort(port) {
   });
 }
 
+async function findAvailableBackendPort() {
+  const preferred = await checkPort(PREFERRED_BACKEND_PORT);
+  if (preferred.available) return PREFERRED_BACKEND_PORT;
+
+  for (let port = 28088; port <= 28120; port += 1) {
+    const candidate = await checkPort(port);
+    if (candidate.available) {
+      console.log(`  [backend] Preferred port ${PREFERRED_BACKEND_PORT} is busy; using ${port} instead.`);
+      return port;
+    }
+  }
+
+  throw new Error(`No free backend port found. Tried ${PREFERRED_BACKEND_PORT} and 28088-28120.`);
+}
+
 function getSetupPaths() {
   const appDir = path.join(ROOT, "app");
   if (osPlatform === "win32") {
@@ -382,7 +403,9 @@ async function getHealth() {
     backend: { ...(await checkPort(PORT_BACKEND)), expectedInUse: backendProc !== null },
   };
   ports.frontend.ok = !ports.frontend.available;
-  ports.backend.ok = backendProc !== null ? !ports.backend.available : ports.backend.available;
+  ports.backend.preferred = PREFERRED_BACKEND_PORT;
+  ports.backend.selected = PORT_BACKEND;
+  ports.backend.ok = true;
 
   const issues = checks
     .filter((check) => !check.ok && !["CUDA backend", "Vulkan backend", "Linux backend", "Mac backend"].includes(check.label))
@@ -390,8 +413,6 @@ async function getHealth() {
   if (!backendInstalled) {
     issues.push(`No ${osPlatform === "win32" ? "Windows" : osPlatform === "darwin" ? "macOS" : "Linux"} backend binary is installed.`);
   }
-  if (!ports.backend.ok) issues.push(`Port ${PORT_BACKEND} is already in use by another process.`);
-
   return {
     ok: criticalOk && ports.backend.ok,
     build: SERVER_BUILD,
@@ -657,7 +678,7 @@ function killBackend() {
   });
 }
 
-function startBackend(settings = {}) {
+async function startBackend(settings = {}) {
   backendError = null;
   currentSettings = { ...currentSettings, ...settings };
   if (!currentSettings.model) currentSettings.model = getDefaultModel();
@@ -665,6 +686,8 @@ function startBackend(settings = {}) {
     console.log("  [backend] No model found in app/models/ — backend not started");
     return;
   }
+
+  PORT_BACKEND = await findAvailableBackendPort();
 
   const resolvedBackendType = resolveBackendType(currentSettings.useGpu, currentSettings.backendType);
   currentSettings.backendType = resolvedBackendType;
@@ -1305,6 +1328,8 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { 
       ready: backendReady, 
       running: backendProc !== null,
+      port: PORT_BACKEND,
+      preferredPort: PREFERRED_BACKEND_PORT,
       error: backendError,
       loading: backendLoadState,
       unloading: backendUnloadState,
@@ -1359,8 +1384,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (typeof body.vae_tiling === "boolean") newSettings.vaeTiling = body.vae_tiling;
     if (typeof body.vae_on_cpu === "boolean") newSettings.vaeOnCpu = body.vae_on_cpu;
-    startBackend(newSettings);
-    return json(res, 200, { ok: true, message: "Backend restarting...", settings: currentSettings });
+    try {
+      await startBackend(newSettings);
+      return json(res, 200, { ok: true, message: "Backend restarting...", settings: currentSettings, port: PORT_BACKEND });
+    } catch (err) {
+      backendError = err.message || String(err);
+      return json(res, 500, { ok: false, error: backendError, port: PORT_BACKEND });
+    }
   }
 
   // POST /api/stop-backend

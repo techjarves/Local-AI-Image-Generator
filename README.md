@@ -86,7 +86,7 @@ Typical generation times for an image with **20 steps** (e.g. 512x512 resolution
 
 ## 🛠️ Troubleshooting
 *   **Reset Environment:** If a build fails or you want to clear dependencies, run `scripts/reset.ps1`. (This preserves your models and generated images).
-*   **Port Conflicts:** The application binds to ports `1420` (Frontend) and `8080` (Backend API). Ensure these are free.
+*   **Port Conflicts:** The frontend uses `1420` by default. The backend tries `8080` first, then automatically falls back to a free port if `8080` is already busy.
 
 ---
 

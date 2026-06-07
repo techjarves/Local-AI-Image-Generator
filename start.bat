@@ -10,6 +10,7 @@ set SETUP=%~dp0scripts\setup.ps1
 set CUDA_BACKEND=%APP%\backend\win\cuda\sd-cuda.exe
 set VULKAN_BACKEND=%APP%\backend\win\vulkan\sd-vulkan.exe
 set SERVE=%~dp0scripts\serve.cjs
+if "%FRONTEND_PORT%"=="" set FRONTEND_PORT=1420
 set SETUP_REASON=
 set SETUP_MODE=Repair
 
@@ -49,9 +50,8 @@ echo.
 echo  Press any key to continue, or Ctrl+C to cancel.
 pause >nul
 
-:: Clear old local server processes before setup so app/tools/node-win can be replaced
-for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8080 "') do taskkill /f /pid %%a >nul 2>nul
-for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":1420 "') do taskkill /f /pid %%a >nul 2>nul
+:: Clear old frontend server process before setup so app/tools/node-win can be replaced
+for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":%FRONTEND_PORT% "') do taskkill /f /pid %%a >nul 2>nul
 
 powershell -ExecutionPolicy Bypass -File "%SETUP%"
 if errorlevel 1 (
@@ -73,10 +73,9 @@ echo   LOCAL AI IMAGE GENERATOR  ^|  Launching...
 echo  ============================================================
 echo.
 
-:: Kill anything on our ports
-echo  Clearing ports 8080 and 1420...
-for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8080 "') do taskkill /f /pid %%a >nul 2>nul
-for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":1420 "') do taskkill /f /pid %%a >nul 2>nul
+:: Clear only the frontend port. The backend auto-selects a free port.
+echo  Clearing frontend port %FRONTEND_PORT%...
+for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":%FRONTEND_PORT% "') do taskkill /f /pid %%a >nul 2>nul
 
 :: Start frontend server + backend manager (serve.cjs manages sd-vulkan.exe)
 echo  Starting Local AI Image Generator...
@@ -86,14 +85,14 @@ start "SD-Server" /min "%NODE%" "%SERVE%"
 timeout /t 2 >nul
 
 :: Open browser
-echo  Opening browser at http://localhost:1420
-start http://localhost:1420
+echo  Opening browser at http://localhost:%FRONTEND_PORT%
+start http://localhost:%FRONTEND_PORT%
 
 echo.
 echo  ============================================================
 echo   Running!
-echo   Web UI:     http://localhost:1420
-echo   GPU API:    http://127.0.0.1:8080
+echo   Web UI:     http://localhost:%FRONTEND_PORT%
+echo   GPU API:    Auto-selected by the app (starts at 8080)
 echo.
 echo   Close this window to stop all services.
 echo  ============================================================
