@@ -1,6 +1,6 @@
 import React, { memo, useState, useEffect } from "react";
 import { FolderOpen, DownloadCloud, RefreshCw, Database, Trash2, Square, HardDrive, Library, AlertTriangle } from "lucide-react";
-import { listLocalModels, startServer, stopServer, importModelFile, deleteModel, downloadModel, cancelModelDownload, getDownloadProgress, getBackendStatus, pingServer, formatBytes, normalizeModel } from "../services/api";
+import { listLocalModels, startServer, stopServer, importModelFile, deleteModel, downloadModel, downloadOpenVinoModel, cancelModelDownload, getDownloadProgress, getBackendStatus, pingServer, formatBytes, normalizeModel } from "../services/api";
 
 const MODEL_LIBRARY = [
   {
@@ -60,7 +60,26 @@ const MODEL_LIBRARY = [
   },
 ];
 
-function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRunning, constraints, showAlert = async ({ message }) => window.alert(message), showConfirm = async ({ message }) => window.confirm(message) }) {
+const OPENVINO_MODEL_LIBRARY = [
+  {
+    group: "Intel NPU - OpenVINO Test",
+    items: [
+      {
+        id: "lcm-dreamshaper-v7-fp16",
+        name: "LCM DreamShaper v7 FP16",
+        filename: "lcm-dreamshaper-v7-fp16",
+        format: "OpenVINO",
+        backendType: "openvino-npu",
+        approxSize: "2.0 GB",
+        resolution: "512x512",
+        notes: "NPU test model for Windows and Linux. Runs the text encoder on CPU, UNet on Intel NPU, and VAE decoder on Intel GPU or CPU fallback.",
+        url: "https://huggingface.co/OpenVINO/LCM_Dreamshaper_v7-fp16-ov",
+      },
+    ],
+  },
+];
+
+function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRunning, constraints, backendOptions, showAlert = async ({ message }) => window.alert(message), showConfirm = async ({ message }) => window.confirm(message) }) {
   const [localModels, setLocalModels] = useState([]);
   const [downloadingModelId, setDownloadingModelId] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
@@ -78,6 +97,9 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
 
   const modelNames = localModels.map((model) => normalizeModel(model).filename);
   const isBusy = loadingModelId !== null || isUnloading;
+  const openvinoSupported = Boolean(backendOptions?.openvinoNpu?.supported);
+  const visibleModelLibrary = openvinoSupported ? [...MODEL_LIBRARY, ...OPENVINO_MODEL_LIBRARY] : MODEL_LIBRARY;
+  const getLocalModelInfo = (modelId) => localModels.map(normalizeModel).find((model) => model.filename === modelId);
 
   useEffect(() => {
     fetchModels();
@@ -217,7 +239,21 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
     setDownloadUrl("");
   };
 
-  const handleLibraryDownload = (model) => {
+  const handleLibraryDownload = async (model) => {
+    if (model.backendType === "openvino-npu") {
+      if (downloadingModelId) return;
+      try {
+        const res = await downloadOpenVinoModel(model.id);
+        if (res.ok) {
+          startProgressPolling(model.filename);
+        } else {
+          showAlert({ title: "Download Failed", message: res.error || "Unknown error", danger: true });
+        }
+      } catch (err) {
+        showAlert({ title: "Download Error", message: err.message, danger: true });
+      }
+      return;
+    }
     downloadByUrl(model.url, model.filename);
   };
 
@@ -246,7 +282,11 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
     
     if (!isTauriDesktop && !isLocalServerMode) {
       const isAlreadyRunning = await pingServer();
-      const cmd = `.\\backend\\win\\vulkan\\sd-vulkan.exe --listen-port ${backendPort} --model .\\models\\${modelId} --threads 8`;
+      const modelInfo = getLocalModelInfo(modelId);
+      const isOpenVinoModel = modelInfo?.backendType === "openvino-npu";
+      const cmd = isOpenVinoModel
+        ? `Run the platform launcher and load "${modelId}" from Model Manager on a configured Intel NPU machine.`
+        : `.\\backend\\win\\vulkan\\sd-vulkan.exe --listen-port ${backendPort} --model .\\models\\${modelId} --threads 8`;
       
       if (isAlreadyRunning) {
         if (await showConfirm({ title: "Web Browser Mode", message: `To load "${modelId}" on the active GPU server, restart your terminal backend with:\n\n${cmd}\n\nUpdate the UI status anyway?`, confirmLabel: "Update UI" })) {
@@ -275,7 +315,19 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
       device: "",
     });
     try {
-      const response = await startServer(modelId, constraints);
+      const modelInfo = getLocalModelInfo(modelId);
+      const loadConstraints = modelInfo?.backendType === "openvino-npu"
+        ? {
+            ...constraints,
+            backendType: "openvino-npu",
+            useGpu: true,
+            width: constraints.width >= 1024 ? 1024 : 512,
+            height: constraints.height >= 1024 ? 1024 : 512,
+            steps: Math.max(1, Math.min(8, constraints.steps || 4)),
+            cfgScale: constraints.cfgScale || 1,
+          }
+        : constraints;
+      const response = await startServer(modelId, loadConstraints);
       console.log(response);
       
       let isReady = false;
@@ -601,7 +653,7 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
                   <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
                     <span style={{ fontWeight: 600, fontSize: "0.95rem" }}>{filename}</span>
                     <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>
-                      Local Weights File • {model.size || formatBytes(model.sizeBytes)}
+                      {model.backendType === "openvino-npu" ? "OpenVINO NPU Model" : model.format || "Local Weights File"} • {model.size || formatBytes(model.sizeBytes)}
                     </span>
                   </div>
                   
@@ -654,7 +706,7 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-        {MODEL_LIBRARY.map((section) => (
+        {visibleModelLibrary.map((section) => (
           <div key={section.group} className="m3-card" style={{ margin: 0 }}>
             <h4 style={{ fontWeight: 700, marginBottom: "12px" }}>{section.group}</h4>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "12px" }}>

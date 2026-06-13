@@ -30,10 +30,27 @@ FRONTEND_PORT="${FRONTEND_PORT:-1420}"
 SETUP_REASON=""
 SETUP_MODE="Repair"
 MAX_PERF_FLAG=""
+SETUP_OPENVINO=0
 
 # Parse args
-if [[ "${1:-}" == "--max-perf" ]]; then
-  MAX_PERF_FLAG="--max-perf"
+for arg in "$@"; do
+  case "$arg" in
+    --max-perf)
+      MAX_PERF_FLAG="--max-perf"
+      ;;
+    --setup-openvino)
+      SETUP_OPENVINO=1
+      ;;
+    *)
+      echo "[ERROR] Unknown option: $arg" >&2
+      echo "Usage: ./linux.sh [--max-perf] [--setup-openvino]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ $SETUP_OPENVINO -eq 1 ]]; then
+  bash "$SCRIPT_DIR/scripts/setup-openvino-npu.sh"
 fi
 
 # ── Symlink node_modules to avoid OS conflicts ──────────────────────────────

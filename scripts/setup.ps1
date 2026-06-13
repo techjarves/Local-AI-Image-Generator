@@ -47,6 +47,18 @@ function Format-Speed {
     return "{0:N0} KB/s" -f ($bps / 1KB)
 }
 
+function Enable-Tls12 {
+    try {
+        # Use the protocol's numeric value because older .NET enum definitions
+        # do not expose the Tls12 member even when Windows supports TLS 1.2.
+        $tls12 = [Enum]::ToObject([Net.SecurityProtocolType], 3072)
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor $tls12
+    } catch {
+        throw "TLS 1.2 could not be enabled. This setup requires 64-bit Windows 10 or Windows 11 with current system updates. $($_.Exception.Message)"
+    }
+}
+
 function Invoke-RichDownload {
     param([string]$Url, [string]$Dest, [string]$Label)
     Print-Info "Downloading: $Label"
@@ -57,7 +69,7 @@ function Invoke-RichDownload {
     $lastTime  = [DateTime]::Now
 
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Enable-Tls12
         $req    = [System.Net.HttpWebRequest]::Create($Url)
         $req.UserAgent = "Mozilla/5.0"
         $resp   = $req.GetResponse()

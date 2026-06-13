@@ -68,15 +68,38 @@ const MODELS  = path.join(ROOT, "app", "models");
 if (!fs.existsSync(MODELS)) {
   fs.mkdirSync(MODELS, { recursive: true });
 }
+const OPENVINO_MODELS = path.join(ROOT, "app", "openvino-models");
+if (!fs.existsSync(OPENVINO_MODELS)) {
+  fs.mkdirSync(OPENVINO_MODELS, { recursive: true });
+}
 const OUTPUTS = path.join(ROOT, "app", "outputs");
 if (!fs.existsSync(OUTPUTS)) {
   fs.mkdirSync(OUTPUTS, { recursive: true });
 }
 
+const OPENVINO_NPU_MODELS = [
+  {
+    id: "lcm-dreamshaper-v7-fp16",
+    name: "LCM DreamShaper v7 FP16",
+    repo: "OpenVINO/LCM_Dreamshaper_v7-fp16-ov",
+    folder: "LCM_Dreamshaper_v7-fp16-ov",
+    approxSize: "2.0 GB",
+    resolution: "512x512",
+    notes: "OpenVINO LCM image model. Uses CPU text encoder, NPU UNet, and GPU or CPU VAE decoder.",
+  },
+];
+
 // ── Backend process state ─────────────────────────────────────────────────────
 let backendProc  = null;
 let backendReady = false;
 let backendError = null;
+let openvinoProc = null;
+let openvinoReady = false;
+let openvinoError = null;
+let openvinoPort = null;
+let openvinoModel = null;
+let openvinoWidth = null;
+let openvinoHeight = null;
 let backendLoadState = {
   active: false,
   phase: "",
@@ -104,6 +127,8 @@ let currentSettings = {
   backendType: "auto",
   vaeTiling: true,
   vaeOnCpu:  false,
+  width: 512,
+  height: 512,
 };
 
 let lastCpuSample = null;
@@ -360,6 +385,98 @@ function getPathSize(targetPath) {
   }
 }
 
+function getOpenVinoPythonCandidates() {
+  const candidates = [];
+  if (process.env.OPENVINO_PYTHON) candidates.push(process.env.OPENVINO_PYTHON);
+  if (osPlatform === "win32") {
+    candidates.push(path.join(ROOT, "app", "tools", "openvino-venv", "Scripts", "python.exe"));
+    candidates.push("C:\\tmp\\npu-test-venv\\Scripts\\python.exe");
+    candidates.push("python");
+  } else {
+    candidates.push(path.join(ROOT, "app", "tools", "openvino-venv", "bin", "python"));
+    candidates.push("python3");
+    candidates.push("python");
+  }
+  return [...new Set(candidates)];
+}
+
+function getOpenVinoPython() {
+  for (const candidate of getOpenVinoPythonCandidates()) {
+    try {
+      const result = spawnSync(candidate, [
+        "-c",
+        "import openvino, openvino_genai, PIL; print(openvino.__version__)",
+      ], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] });
+      if (result.status === 0) return candidate;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function getOpenVinoNpuInfo() {
+  if (osPlatform !== "win32" && osPlatform !== "linux") {
+    return { supported: false, reason: "OpenVINO NPU backend is supported on Windows and Linux Intel Core Ultra systems." };
+  }
+  const python = getOpenVinoPython();
+  if (!python) {
+    const setupScript = osPlatform === "win32"
+      ? "scripts/setup-openvino-npu.ps1"
+      : "bash scripts/setup-openvino-npu.sh";
+    return {
+      supported: false,
+      reason: `OpenVINO GenAI runtime is not installed. Run ${setupScript} first.`,
+    };
+  }
+  try {
+    const script = [
+      "import json, openvino as ov",
+      "core=ov.Core()",
+      "devices=core.available_devices",
+      "info={'devices':devices,'npu':None}",
+      "if 'NPU' in devices:",
+      "    info['npu']={'name':core.get_property('NPU','FULL_DEVICE_NAME'),'capabilities':core.get_property('NPU','OPTIMIZATION_CAPABILITIES')}",
+      "print(json.dumps(info))",
+    ].join("\n");
+    const result = spawnSync(python, ["-c", script], { encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "pipe"] });
+    if (result.status !== 0) {
+      return { supported: false, python, reason: result.stderr.trim() || "OpenVINO NPU probe failed." };
+    }
+    const info = JSON.parse(result.stdout.trim());
+    if (!info.devices.includes("NPU")) {
+      return { supported: false, python, reason: `OpenVINO is installed, but NPU is not available. Devices: ${info.devices.join(", ")}` };
+    }
+    return { supported: true, platform: osPlatform, python, devices: info.devices, npu: info.npu };
+  } catch (err) {
+    return { supported: false, python, reason: err.message || String(err) };
+  }
+}
+
+function getOpenVinoModelInfo() {
+  return OPENVINO_NPU_MODELS.map((model) => {
+    const modelPath = path.join(OPENVINO_MODELS, model.folder);
+    const requiredFiles = [
+      path.join(modelPath, "model_index.json"),
+      path.join(modelPath, "text_encoder", "openvino_model.xml"),
+      path.join(modelPath, "unet", "openvino_model.xml"),
+      path.join(modelPath, "vae_decoder", "openvino_model.xml"),
+    ];
+    const installed = requiredFiles.every((file) => fs.existsSync(file));
+    return {
+      ...model,
+      filename: model.id,
+      path: modelPath,
+      installed,
+      sizeBytes: getPathSize(modelPath),
+      size: formatBytes(getPathSize(modelPath)),
+      format: "OpenVINO",
+    };
+  });
+}
+
+function findOpenVinoModel(modelId) {
+  return getOpenVinoModelInfo().find((model) => model.id === modelId || model.folder === modelId || model.name === modelId);
+}
+
 function pathInside(childPath, parentPath) {
   const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
@@ -468,7 +585,7 @@ async function getHealth() {
 
   const ports = {
     frontend: { ...(await checkPort(PORT_FRONTEND)), expectedInUse: true },
-    backend: { ...(await checkPort(PORT_BACKEND)), expectedInUse: backendProc !== null },
+    backend: { ...(await checkPort(PORT_BACKEND)), expectedInUse: backendProc !== null || openvinoProc !== null },
   };
   ports.frontend.ok = !ports.frontend.available;
   ports.backend.preferred = PREFERRED_BACKEND_PORT;
@@ -489,8 +606,8 @@ async function getHealth() {
     checks,
     ports,
     backend: {
-      ready: backendReady,
-      running: backendProc !== null,
+      ready: backendReady || openvinoReady,
+      running: backendProc !== null || openvinoProc !== null,
       error: backendError,
       settings: currentSettings,
       options: getBackendOptions(),
@@ -609,12 +726,16 @@ function getBackendOptions() {
   // as Metal-capable so the UI does not default to CPU if a probe flag changes
   // upstream.
   const metalAvailable = metalInstalled;
+  const openvinoNpu = getOpenVinoNpuInfo();
+  const openvinoModels = getOpenVinoModelInfo();
+  const openvinoNpuAvailable = openvinoNpu.supported && openvinoModels.some((model) => model.installed);
 
   const options = [{ id: "cpu", label: "CPU", available: true }];
   if (metalAvailable) options.push({ id: "metal", label: "Metal GPU", available: true });
   if (vulkanAvailable) options.push({ id: "vulkan", label: "Vulkan GPU", available: true });
   if (rocmAvailable) options.push({ id: "rocm", label: "ROCm GPU (AMD)", available: true });
   if (cudaAvailable) options.push({ id: "cuda", label: "CUDA GPU", available: true });
+  if (openvinoNpuAvailable) options.push({ id: "openvino-npu", label: "NPU (OpenVINO)", available: true });
 
   const unavailable = [];
   if (vulkanInstalled && !vulkanAvailable) {
@@ -628,6 +749,11 @@ function getBackendOptions() {
   }
   if (metalInstalled && !metalAvailable) {
     unavailable.push({ id: "metal", label: "Metal GPU", reason: "Installed, but Metal backend validation failed." });
+  }
+  if (openvinoNpu.supported && !openvinoNpuAvailable) {
+    unavailable.push({ id: "openvino-npu", label: "NPU (OpenVINO)", reason: "Runtime is ready, but no OpenVINO NPU model is downloaded." });
+  } else if (!openvinoNpu.supported && (osPlatform === "win32" || osPlatform === "linux")) {
+    unavailable.push({ id: "openvino-npu", label: "NPU (OpenVINO)", reason: openvinoNpu.reason });
   }
 
   let defaultBackend = "cpu";
@@ -654,6 +780,9 @@ function getBackendOptions() {
     vulkanAvailable,
     rocmAvailable,
     metalAvailable,
+    openvinoNpuAvailable,
+    openvinoNpu,
+    openvinoModels,
     defaultBackendType: defaultBackend,
   };
   return cachedBackendOptions;
@@ -795,6 +924,208 @@ function pingBackendReady() {
   });
 }
 
+function requestJson(url, payload = null, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const data = payload ? Buffer.from(JSON.stringify(payload), "utf8") : null;
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname + parsed.search,
+      method: data ? "POST" : "GET",
+      headers: data ? {
+        "Content-Type": "application/json",
+        "Content-Length": data.length,
+      } : {},
+      timeout: timeoutMs,
+    }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        try {
+          const jsonBody = JSON.parse(body || "{}");
+          if (res.statusCode < 200 || res.statusCode >= 300 || jsonBody.ok === false) {
+            reject(new Error(jsonBody.error || `HTTP ${res.statusCode}`));
+            return;
+          }
+          resolve(jsonBody);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("Request timed out")));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function killOpenVinoWorker() {
+  if (!openvinoProc) {
+    openvinoReady = false;
+    return;
+  }
+  console.log("  [openvino-npu] Stopping worker...");
+  try { openvinoProc.kill("SIGTERM"); } catch (_) {}
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  try { openvinoProc.kill("SIGKILL"); } catch (_) {}
+  openvinoProc = null;
+  openvinoReady = false;
+}
+
+function getOpenVinoResolution(settings = {}) {
+  const width = Number(settings.width) || 512;
+  const height = Number(settings.height) || 512;
+  const supported = (width === 512 && height === 512) || (width === 1024 && height === 1024);
+  if (!supported) {
+    throw new Error("OpenVINO NPU supports 512x512 generation or 1024x1024 HD upscale.");
+  }
+  return { width, height };
+}
+
+async function startOpenVinoWorker(settings = {}) {
+  const npuInfo = getOpenVinoNpuInfo();
+  if (!npuInfo.supported) throw new Error(npuInfo.reason || "OpenVINO NPU is not available.");
+  const model = findOpenVinoModel(settings.model) || getOpenVinoModelInfo().find((item) => item.installed);
+  if (!model || !model.installed) {
+    throw new Error("OpenVINO NPU model is not downloaded. Download an OpenVINO NPU model from Model Manager first.");
+  }
+  const { width, height } = getOpenVinoResolution(settings);
+  if (openvinoProc &&
+      openvinoReady &&
+      openvinoModel === model.id) {
+    currentSettings = { ...currentSettings, ...settings, model: model.id, width, height };
+    return;
+  }
+
+  await killBackend();
+  await killOpenVinoWorker();
+  openvinoError = null;
+  openvinoReady = false;
+  openvinoModel = model.id;
+  openvinoWidth = 512;
+  openvinoHeight = 512;
+  openvinoPort = await findAvailableBackendPort();
+  PORT_BACKEND = openvinoPort;
+
+  currentSettings = { ...currentSettings, ...settings };
+  currentSettings.backendType = "openvino-npu";
+  currentSettings.useGpu = true;
+  currentSettings.backendMode = "NPU (OpenVINO)";
+  currentSettings.backendBinary = "openvino_npu_worker.py";
+  currentSettings.backendDevice = npuInfo.npu?.name || "Intel AI Boost";
+  currentSettings.model = model.id;
+  currentSettings.width = width;
+  currentSettings.height = height;
+
+  backendError = null;
+  backendLoadState = {
+    active: true,
+    phase: "Compiling OpenVINO NPU pipeline (512x512)...",
+    progress: 5,
+    current: 0,
+    total: 0,
+    speed: "",
+    model: model.name,
+    backendMode: "NPU (OpenVINO)",
+    backendBinary: "openvino_npu_worker.py",
+    device: currentSettings.backendDevice,
+  };
+
+  const workerPath = path.join(ROOT, "scripts", "openvino_npu_worker.py");
+  const cacheDir = path.join(ROOT, "app", "tools", "openvino-cache", "512x512");
+  console.log(`  [openvino-npu] Starting 512x512 worker on port ${openvinoPort}`);
+  openvinoProc = spawn(npuInfo.python, [
+    workerPath,
+    "--model-dir", model.path,
+    "--port", String(openvinoPort),
+    "--width", "512",
+    "--height", "512",
+    "--cache-dir", cacheDir,
+  ], { stdio: "pipe" });
+
+  let openvinoStdoutBuffer = "";
+  openvinoProc.stdout.on("data", (data) => {
+    const text = data.toString();
+    process.stdout.write("  " + text);
+    openvinoStdoutBuffer += text;
+    const lines = openvinoStdoutBuffer.split(/\r?\n/);
+    openvinoStdoutBuffer = lines.pop() || "";
+    for (const line of lines) {
+      if (line.includes("READY")) {
+        openvinoReady = true;
+        backendReady = true;
+        backendLoadState = { ...backendLoadState, active: false, phase: "OpenVINO NPU model ready", progress: 100 };
+      }
+      const progressMatch = line.match(/PROGRESS\s+(\d+)\/(\d+)\s+(.+)$/);
+      if (progressMatch) {
+        generationState.active = true;
+        generationState.step = Number(progressMatch[1]);
+        generationState.steps = Number(progressMatch[2]);
+        generationState.speed = progressMatch[3].trim();
+        generationState.decoding = false;
+      } else if (line.includes("DECODING") && generationState.active) {
+        generationState.step = generationState.steps;
+        generationState.decoding = true;
+        generationState.speed = "";
+      }
+    }
+  });
+  openvinoProc.stderr.on("data", (data) => {
+    const text = data.toString();
+    process.stderr.write("  " + text);
+    const cleanText = stripAnsi(text).trim();
+    if (cleanText && (cleanText.includes("ERROR") || cleanText.includes("Traceback") || cleanText.includes("Exception"))) {
+      openvinoError = cleanText;
+      backendError = openvinoError;
+    }
+  });
+  openvinoProc.on("exit", (code) => {
+    console.log("  [openvino-npu] worker exited with code", code);
+    openvinoProc = null;
+    openvinoReady = false;
+    backendReady = false;
+    if (code !== 0 && code !== null && !backendError) backendError = `OpenVINO NPU worker exited with code ${code}`;
+    backendLoadState.active = false;
+  });
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 360000) {
+    if (openvinoReady) return;
+    if (backendError) throw new Error(backendError);
+    if (!openvinoProc) throw new Error("OpenVINO NPU worker exited during startup.");
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    backendLoadState.progress = Math.min(95, 5 + Math.round(elapsed / 2));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  await killOpenVinoWorker();
+  throw new Error("OpenVINO NPU 512x512 compile timed out after 6 minutes.");
+}
+
+async function generateWithOpenVino(body) {
+  if (!openvinoReady || !openvinoPort) throw new Error("OpenVINO NPU worker is not ready. Load an OpenVINO NPU model first.");
+  const steps = Math.max(1, Math.min(8, Number(body.steps) || 4));
+  generationState = { active: true, step: 0, steps, speed: "", decoding: false };
+  try {
+    const result = await requestJson(`http://127.0.0.1:${openvinoPort}/generate`, {
+      prompt: body.prompt,
+      negative_prompt: body.negative_prompt || "",
+      width: Number(body.width) || currentSettings.width || 512,
+      height: Number(body.height) || currentSettings.height || 512,
+      steps,
+      cfg_scale: Number(body.cfg_scale) || 1.0,
+      seed: body.seed,
+    }, 300000);
+    resetGenerationState();
+    return result;
+  } catch (err) {
+    resetGenerationState();
+    throw err;
+  }
+}
+
 function startBackendReadyPoll() {
   let attempts = 0;
   const interval = setInterval(async () => {
@@ -839,6 +1170,11 @@ function killBackend() {
 }
 
 async function startBackend(settings = {}) {
+  if (settings.backendType === "openvino-npu") {
+    await startOpenVinoWorker(settings);
+    return;
+  }
+  await killOpenVinoWorker();
   backendError = null;
   currentSettings = { ...currentSettings, ...settings };
   if (!currentSettings.model) currentSettings.model = getDefaultModel();
@@ -1118,6 +1454,54 @@ let downloadState = {
 };
 let activeDownload = null;
 
+function startOpenVinoModelDownload(modelId) {
+  if (downloadState.active) return;
+  const npuInfo = getOpenVinoNpuInfo();
+  if (!npuInfo.supported) throw new Error(npuInfo.reason || "OpenVINO NPU runtime is not available.");
+  const model = OPENVINO_NPU_MODELS.find((item) => item.id === modelId);
+  if (!model) throw new Error("Unknown OpenVINO model.");
+
+  const destDir = path.join(OPENVINO_MODELS, model.folder);
+  fs.mkdirSync(destDir, { recursive: true });
+  downloadState = {
+    active: true,
+    filename: model.name,
+    progress: -1,
+    speed: "Downloading snapshot",
+    eta: 0,
+    totalBytes: 0,
+    downloadedBytes: 0,
+    error: null,
+  };
+
+  const script = [
+    "from huggingface_hub import snapshot_download",
+    `snapshot_download(repo_id=${JSON.stringify(model.repo)}, local_dir=${JSON.stringify(destDir)}, ignore_patterns=['safety_checker/*','feature_extractor/*','*.safetensors'])`,
+    "print('DONE')",
+  ].join("\n");
+  console.log(`  [openvino-download] Downloading ${model.repo} -> ${destDir}`);
+  const proc = spawn(npuInfo.python, ["-c", script], { stdio: "pipe" });
+  activeDownload = { process: proc, destPath: destDir, openvino: true };
+  proc.stdout.on("data", (data) => process.stdout.write("  [openvino-download] " + data.toString()));
+  proc.stderr.on("data", (data) => process.stderr.write("  [openvino-download] " + data.toString()));
+  proc.on("exit", (code) => {
+    activeDownload = null;
+    if (String(downloadState.error || "").toLowerCase().includes("cancelled")) {
+      return;
+    }
+    downloadState.active = false;
+    if (code === 0) {
+      downloadState.progress = 100;
+      downloadState.downloadedBytes = getPathSize(destDir);
+      downloadState.totalBytes = downloadState.downloadedBytes;
+      downloadState.speed = "Complete";
+      cachedBackendOptions = null;
+    } else {
+      downloadState.error = `OpenVINO model download failed with code ${code}`;
+    }
+  });
+}
+
 // ── Generation State (Real-time progress parser) ─────────────────────────────
 let generationState = {
   active: false,
@@ -1342,9 +1726,14 @@ function cancelModelDownload() {
   }
   const filename = downloadState.filename;
   if (activeDownload) {
-    try { activeDownload.request.destroy(new Error("Download cancelled by user")); } catch (_) {}
-    try { activeDownload.fileStream.destroy(); } catch (_) {}
-    try { fs.unlinkSync(activeDownload.tempPath || activeDownload.destPath); } catch (_) {}
+    if (activeDownload.process) {
+      try { activeDownload.process.kill("SIGTERM"); } catch (_) {}
+      setTimeout(() => { try { activeDownload?.process?.kill("SIGKILL"); } catch (_) {} }, 1000);
+    } else {
+      try { activeDownload.request.destroy(new Error("Download cancelled by user")); } catch (_) {}
+      try { activeDownload.fileStream.destroy(); } catch (_) {}
+      try { fs.unlinkSync(activeDownload.tempPath || activeDownload.destPath); } catch (_) {}
+    }
   } else if (filename) {
     try { fs.unlinkSync(`${path.join(MODELS, filename)}.part`); } catch (_) {}
   }
@@ -1514,9 +1903,9 @@ function safeOutputName(value) {
 }
 
 function saveGeneratedOutput(imageDataUrl, metadata = {}) {
-  const match = String(imageDataUrl || "").match(/^data:(image\/(?:png|jpeg|jpg|webp|svg\+xml));base64,(.+)$/);
+  const match = String(imageDataUrl || "").match(/^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/);
   if (!match) {
-    throw new Error("Expected a base64 image data URL");
+    throw new Error("Expected a real base64 PNG, JPEG, or WebP image data URL");
   }
 
   const mime = match[1];
@@ -1525,9 +1914,26 @@ function saveGeneratedOutput(imageDataUrl, metadata = {}) {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
     "image/webp": ".webp",
-    "image/svg+xml": ".svg",
   };
   const ext = extByMime[mime] || ".png";
+  const imageBuffer = Buffer.from(match[2], "base64");
+  const isPng = imageBuffer.length > 8 &&
+    imageBuffer[0] === 0x89 &&
+    imageBuffer[1] === 0x50 &&
+    imageBuffer[2] === 0x4e &&
+    imageBuffer[3] === 0x47;
+  const isJpeg = imageBuffer.length > 3 &&
+    imageBuffer[0] === 0xff &&
+    imageBuffer[1] === 0xd8 &&
+    imageBuffer[2] === 0xff;
+  const isWebp = imageBuffer.length > 12 &&
+    imageBuffer.toString("ascii", 0, 4) === "RIFF" &&
+    imageBuffer.toString("ascii", 8, 12) === "WEBP";
+  if ((mime === "image/png" && !isPng) ||
+      ((mime === "image/jpeg" || mime === "image/jpg") && !isJpeg) ||
+      (mime === "image/webp" && !isWebp)) {
+    throw new Error("Generated image payload did not match its declared image format.");
+  }
   const createdAt = new Date().toISOString();
   const stamp = createdAt.replace(/[:.]/g, "-");
   const seed = metadata.seed !== undefined && metadata.seed !== null ? `-${safeOutputName(metadata.seed)}` : "";
@@ -1537,7 +1943,7 @@ function saveGeneratedOutput(imageDataUrl, metadata = {}) {
   const imagePath = path.join(OUTPUTS, imageFilename);
   const metadataPath = path.join(OUTPUTS, metadataFilename);
 
-  fs.writeFileSync(imagePath, Buffer.from(match[2], "base64"));
+  fs.writeFileSync(imagePath, imageBuffer);
   const savedMetadata = {
     ...metadata,
     createdAt,
@@ -1703,9 +2109,9 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/backend-status
   if (req.url === "/api/backend-status" && req.method === "GET") {
-    return json(res, 200, { 
-      ready: backendReady, 
-      running: backendProc !== null,
+    return json(res, 200, {
+      ready: backendReady || openvinoReady,
+      running: backendProc !== null || openvinoProc !== null,
       port: PORT_BACKEND,
       preferredPort: PREFERRED_BACKEND_PORT,
       error: backendError,
@@ -1742,6 +2148,17 @@ const server = http.createServer(async (req, res) => {
     } catch (_) { return json(res, 200, { models: [] }); }
   }
 
+  if (req.url === "/api/openvino-models" && req.method === "GET") {
+    const npuInfo = getOpenVinoNpuInfo();
+    return json(res, 200, {
+      supported: npuInfo.supported,
+      reason: npuInfo.reason || "",
+      npu: npuInfo.npu || null,
+      python: npuInfo.python || "",
+      models: npuInfo.supported ? getOpenVinoModelInfo() : [],
+    });
+  }
+
   // POST /api/restart-backend — restart with new settings
   if (req.url === "/api/restart-backend" && req.method === "POST") {
     const body = await readJsonBody(req, res);
@@ -1750,11 +2167,13 @@ const server = http.createServer(async (req, res) => {
     await killBackend();
     await new Promise(r => setTimeout(r, 500));
     const newSettings = {};
-    if (body.model)    newSettings.model    = path.join(MODELS, body.model);
+    if (body.model)    newSettings.model    = body.backend_type === "openvino-npu" ? String(body.model) : path.join(MODELS, body.model);
     if (body.steps)    newSettings.steps    = parseInt(body.steps);
     if (body.cfgScale) newSettings.cfgScale = parseFloat(body.cfgScale);
     if (body.sampler)  newSettings.sampler  = body.sampler;
     if (body.threads)  newSettings.threads  = parseInt(body.threads);
+    if (body.width)    newSettings.width    = parseInt(body.width);
+    if (body.height)   newSettings.height   = parseInt(body.height);
     if (typeof body.use_gpu === "boolean") newSettings.useGpu = body.use_gpu;
     if (body.backend_type) {
       newSettings.backendType = String(body.backend_type);
@@ -1763,6 +2182,18 @@ const server = http.createServer(async (req, res) => {
     if (typeof body.vae_tiling === "boolean") newSettings.vaeTiling = body.vae_tiling;
     if (typeof body.vae_on_cpu === "boolean") newSettings.vaeOnCpu = body.vae_on_cpu;
     try {
+      if (newSettings.backendType === "openvino-npu") {
+        startBackend(newSettings).catch((err) => {
+          backendError = err.message || String(err);
+          backendLoadState = {
+            ...backendLoadState,
+            active: false,
+            phase: "OpenVINO NPU model load failed",
+          };
+          console.error("  [openvino-npu] Startup failed:", backendError);
+        });
+        return json(res, 200, { ok: true, message: "OpenVINO NPU backend starting...", settings: currentSettings, port: PORT_BACKEND });
+      }
       await startBackend(newSettings);
       return json(res, 200, { ok: true, message: "Backend restarting...", settings: currentSettings, port: PORT_BACKEND });
     } catch (err) {
@@ -1774,6 +2205,7 @@ const server = http.createServer(async (req, res) => {
   // POST /api/stop-backend
   if (req.url === "/api/stop-backend" && req.method === "POST") {
     await killBackend();
+    await killOpenVinoWorker();
     return json(res, 200, { ok: true });
   }
 
@@ -1786,6 +2218,19 @@ const server = http.createServer(async (req, res) => {
     
     startModelDownload(url);
     return json(res, 200, { ok: true, message: "Download started" });
+  }
+
+  if (req.url === "/api/download-openvino-model" && req.method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body) return;
+    const modelId = String(body.model_id || body.modelId || "");
+    if (!modelId) return json(res, 400, { ok: false, error: "model_id is required" });
+    try {
+      startOpenVinoModelDownload(modelId);
+      return json(res, 200, { ok: true, message: "OpenVINO model download started" });
+    } catch (err) {
+      return json(res, 500, { ok: false, error: err.message || String(err) });
+    }
   }
 
   // GET /api/download-progress
@@ -1802,6 +2247,16 @@ const server = http.createServer(async (req, res) => {
   // GET /api/generation-progress
   if (req.url === "/api/generation-progress" && req.method === "GET") {
     return json(res, 200, generationState);
+  }
+
+  if (req.url === "/api/openvino-generate" && req.method === "POST") {
+    const body = await readJsonBody(req, res);
+    if (!body) return;
+    try {
+      return json(res, 200, await generateWithOpenVino(body));
+    } catch (err) {
+      return json(res, 500, { ok: false, error: err.message || String(err) });
+    }
   }
 
   // GET /api/outputs
@@ -1871,11 +2326,17 @@ const server = http.createServer(async (req, res) => {
     const { filename } = body;
     if (!filename) return json(res, 400, { error: "Filename is required" });
     
+    const openvinoModel = findOpenVinoModel(filename);
     const safeFilename = path.basename(filename);
     const modelPath = path.join(MODELS, safeFilename);
     
     try {
-      if (fs.existsSync(modelPath)) {
+      if (openvinoModel?.installed && openvinoModel.path && pathInside(openvinoModel.path, OPENVINO_MODELS)) {
+        fs.rmSync(openvinoModel.path, { recursive: true, force: true });
+        cachedBackendOptions = null;
+        console.log(`  [api] Deleted OpenVINO model: ${openvinoModel.id}`);
+        return json(res, 200, { ok: true, message: `Deleted ${openvinoModel.name}` });
+      } else if (fs.existsSync(modelPath)) {
         fs.unlinkSync(modelPath);
         console.log(`  [api] Deleted model file: ${safeFilename}`);
         return json(res, 200, { ok: true, message: `Deleted ${safeFilename}` });
