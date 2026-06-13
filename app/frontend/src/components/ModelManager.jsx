@@ -81,6 +81,7 @@ const OPENVINO_MODEL_LIBRARY = [
 
 function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRunning, constraints, backendOptions, showAlert = async ({ message }) => window.alert(message), showConfirm = async ({ message }) => window.confirm(message) }) {
   const [localModels, setLocalModels] = useState([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [downloadingModelId, setDownloadingModelId] = useState(null);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState("");
@@ -171,11 +172,14 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
   };
 
   const fetchModels = async () => {
+    setIsLoadingModels(true);
     try {
       const list = await listLocalModels();
       setLocalModels(list.map(normalizeModel).filter((model) => model.filename));
     } catch (e) {
       console.error(e);
+    } finally {
+      setIsLoadingModels(false);
     }
   };
 
@@ -628,7 +632,12 @@ function ModelManager({ activeModel, setActiveModel, serverRunning, setServerRun
           Local Models ({localModels.length})
         </h3>
         
-        {localModels.length === 0 ? (
+        {isLoadingModels ? (
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: "10px", padding: "24px 0", color: "var(--md-sys-color-outline)" }}>
+            <RefreshCw className="progress-spinner" size={16} />
+            <span style={{ fontSize: "0.9rem" }}>Scanning models folder...</span>
+          </div>
+        ) : localModels.length === 0 ? (
           <p style={{ fontSize: "0.9rem", color: "var(--md-sys-color-outline)", textAlign: "center", padding: "16px 0" }}>
             No models detected in app/models/. Download from the library below or import a file.
           </p>
